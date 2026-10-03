@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#181d29" />
+    <title>H3 Video Archive</title>
+    <link rel="stylesheet" href="/assets/styles.css?v=20261003-4" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <div class="eyebrow">MINIMAX H3 / LOCAL ARCHIVE</div>
+          <h1>Video Archive</h1>
+          <p>同檔名 MP4＋生成資訊 TXT</p>
+        </div>
+        <div class="topbar-actions">
+          <div id="library-status" class="status-line" aria-live="polite">正在掃描…</div>
+          <button id="sources-button" class="button button-quiet" type="button">資料夾來源</button>
+          <button id="theme-button" class="button button-icon" type="button" title="切換淺色／深色">☀</button>
+          <button id="refresh-button" class="button button-quiet" type="button">重新掃描</button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="library-panel panel">
+          <div class="panel-heading">
+            <div>
+              <div class="section-kicker">LIBRARY</div>
+              <h2>影片庫</h2>
+            </div>
+            <div class="panel-heading-tools">
+              <span id="paired-count" class="count-badge">—</span>
+              <button id="toggle-library-button" class="panel-toggle" type="button" aria-label="收合影片清單" title="收合影片清單">‹</button>
+            </div>
+          </div>
+
+          <label class="search-box" for="search-input">
+            <span class="search-icon">⌕</span>
+            <input id="search-input" type="search" placeholder="搜尋檔名或 seed…" autocomplete="off" />
+            <kbd>/</kbd>
+          </label>
+
+          <div id="folder-filters" class="filter-row" aria-label="資料夾篩選"></div>
+
+          <div class="list-toolbar">
+            <span id="visible-count">—</span>
+            <div class="list-tools">
+              <button id="compare-button" class="button button-compare" type="button" disabled>比較選取 <b id="selected-count">0</b></button>
+              <label>
+                <span class="sr-only">排序</span>
+                <select id="sort-select">
+                  <option value="modified">最新生成</option>
+                  <option value="name">檔名字母</option>
+                  <option value="resolution">解析度</option>
+                </select>
+              </label>
+            </div>
+          </div>
+
+          <div id="video-list" class="video-list" aria-label="配對影片清單"></div>
+          <div id="empty-state" class="empty-state hidden">
+            <div class="empty-mark">∅</div>
+            <strong>尚未加入影片資料夾</strong>
+            <p>請按右上角「資料夾來源」，加入包含同檔名 MP4＋TXT 的資料夾。</p>
+          </div>
+        </aside>
+
+        <section class="stage-panel panel">
+          <div class="stage-header">
+            <div>
+              <div class="section-kicker" id="stage-kicker">NOW VIEWING</div>
+              <h2 id="current-title">尚未選取影片</h2>
+              <div id="current-path" class="muted-text">從左側選擇一支影片開始</div>
+            </div>
+            <div class="stage-actions">
+              <button id="exit-compare-button" class="button button-quiet hidden" type="button">返回單片</button>
+              <button id="previous-button" class="icon-button" type="button" title="上一支 (P)" aria-label="上一支">‹</button>
+              <button id="next-button" class="icon-button" type="button" title="下一支 (N)" aria-label="下一支">›</button>
+            </div>
+          </div>
+
+          <div id="single-view">
+            <div class="player-wrap">
+              <div id="player-placeholder" class="player-placeholder">
+                <div class="placeholder-orbit"></div>
+                <span>選取影片以開始播放</span>
+              </div>
+              <video id="video-player" class="video-player hidden" controls playsinline preload="metadata"></video>
+            </div>
+
+            <div class="stage-footer">
+              <div id="current-badges" class="badge-row"></div>
+              <div class="media-facts" id="media-facts"></div>
+              <button id="copy-prompt-button" class="button button-copy" type="button" disabled>複製提示詞</button>
+            </div>
+          </div>
+
+          <div id="compare-view" class="compare-view hidden">
+            <div class="compare-toolbar">
+              <div>
+                <div class="section-kicker">SIDE BY SIDE</div>
+                <strong>TXT 差異比較</strong>
+                <span id="compare-subtitle" class="muted-text"></span>
+              </div>
+              <div class="compare-actions">
+                <button id="play-all-button" class="button button-compare" type="button">同時播放</button>
+                <button id="pause-all-button" class="button button-quiet" type="button">全部暫停</button>
+              </div>
+            </div>
+            <div id="compare-grid" class="compare-grid"></div>
+            <section class="diff-panel">
+              <div class="diff-heading">
+                <div>
+                  <div class="section-kicker">DIFFERENCES</div>
+                  <strong>生成 TXT 差異</strong>
+                </div>
+                <span id="diff-count" class="count-badge">—</span>
+              </div>
+              <div id="diff-table-wrap" class="diff-table-wrap"></div>
+              <details class="prompt-diff-section">
+                <summary>提示詞差異行 <span class="summary-caret">＋</span></summary>
+                <div id="prompt-diff-content" class="prompt-diff-content"></div>
+              </details>
+            </section>
+          </div>
+        </section>
+
+        <aside class="inspector-panel panel">
+          <div class="panel-heading inspector-heading">
+            <div>
+              <div class="section-kicker">GENERATION RECORD</div>
+              <h2>生成資訊</h2>
+            </div>
+            <div class="panel-heading-tools">
+              <span id="metadata-status" class="status-badge status-neutral">等待</span>
+              <button id="toggle-inspector-button" class="panel-toggle" type="button" aria-label="收合生成資訊" title="收合生成資訊">›</button>
+            </div>
+          </div>
+
+          <div id="inspector-empty" class="inspector-empty">
+            <span class="empty-mark">⌁</span>
+            <p>選取影片後查看模型、seed、尺寸與完整提示詞。</p>
+          </div>
+
+          <div id="inspector-content" class="inspector-content hidden">
+            <section>
+              <div class="section-kicker">SUMMARY</div>
+              <dl id="summary-grid" class="summary-grid"></dl>
+            </section>
+
+            <details id="reference-section" class="detail-section">
+              <summary>參考媒體映射 <span class="summary-caret">＋</span></summary>
+              <div id="reference-content" class="detail-body"></div>
+            </details>
+
+            <details class="detail-section">
+              <summary>完整提示詞 <span class="summary-caret">＋</span></summary>
+              <div class="detail-action-row">
+                <button id="copy-prompt-detail-button" class="button button-copy" type="button">一鍵複製</button>
+              </div>
+              <pre id="prompt-content" class="raw-content"></pre>
+            </details>
+
+            <details class="detail-section">
+              <summary>原始 TXT <span class="summary-caret">＋</span></summary>
+              <pre id="raw-content" class="raw-content"></pre>
+            </details>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <dialog id="sources-dialog" class="sources-dialog">
+      <form method="dialog" class="sources-form">
+        <div class="dialog-header">
+          <div>
+            <div class="section-kicker">SOURCES</div>
+            <h2>資料夾來源</h2>
+          </div>
+          <button id="close-sources-button" class="icon-button" type="submit" aria-label="關閉">×</button>
+        </div>
+        <p class="dialog-intro">查看器只會讀取你加入的資料夾，並找出同一資料夾內同檔名的 MP4＋TXT。直接執行時不會自動使用目前工作區。</p>
+        <div class="source-add-form">
+          <label>
+            資料夾完整路徑
+            <input id="source-path-input" type="text" placeholder="例如 D:\\Videos\\H3" autocomplete="off" />
+          </label>
+          <label>
+            顯示名稱（可選）
+            <input id="source-label-input" type="text" placeholder="例如 我的 H3 影片" autocomplete="off" />
+          </label>
+          <button id="add-source-button" class="button button-primary" type="button">加入資料夾</button>
+        </div>
+        <div class="source-list-heading">
+          <span>已加入的位置</span>
+          <span id="source-count" class="muted-text"></span>
+        </div>
+        <div id="source-list" class="source-list"></div>
+        <div class="dialog-footer">
+          <span class="muted-text">加入後按「重新掃描」即可更新影片庫。</span>
+          <button id="done-sources-button" class="button button-primary" type="submit">完成</button>
+        </div>
+      </form>
+    </dialog>
+
+    <template id="video-card-template">
+      <article class="video-card">
+        <button class="select-toggle" type="button" aria-label="選取影片">
+          <span class="checkmark">✓</span>
+        </button>
+        <button class="card-main" type="button">
+          <div class="card-thumb-wrap">
+            <video class="card-thumb" muted playsinline preload="metadata"></video>
+            <span class="card-kind"></span>
+            <span class="card-index"></span>
+          </div>
+          <div class="card-copy">
+            <strong class="card-title"></strong>
+            <span class="card-folder"></span>
+            <div class="card-meta"></div>
+          </div>
+        </button>
+      </article>
+    </template>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>
