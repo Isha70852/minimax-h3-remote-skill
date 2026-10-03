@@ -8,6 +8,7 @@ const state = {
   selectedPath: null,
   selectedItem: null,
   selectedPaths: new Set(),
+  favoriteIds: readFavoriteIds(),
   compareDetails: [],
   compareMode: false,
   libraryCollapsed: localStorage.getItem("h3-archive-library-collapsed") === "true",
@@ -24,8 +25,9 @@ document.addEventListener("DOMContentLoaded", () => {
     "paired-count", "toggle-library-button", "search-input", "folder-filters", "sort-select",
     "visible-count", "compare-button", "selected-count", "video-list",
     "empty-state", "video-card-template", "stage-kicker", "current-title",
-    "current-path", "exit-compare-button", "previous-button", "next-button",
-    "single-view", "player-placeholder", "video-player", "current-badges",
+      "current-path", "exit-compare-button", "previous-button", "next-button",
+      "favorite-button", "rename-button", "delete-button",
+      "single-view", "player-placeholder", "video-player", "current-badges",
     "media-facts", "copy-prompt-button", "compare-view", "compare-subtitle",
     "play-all-button", "pause-all-button", "compare-grid", "diff-count",
     "diff-table-wrap", "prompt-diff-content", "inspector-empty",
@@ -39,7 +41,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   applyTheme();
-  elements.refreshButton.addEventListener("click", () => loadLibrary(true));
+  elements.refreshButton.addEventListener("click", () => loadLibrary(true, true));
   elements.sourcesButton.addEventListener("click", openSourcesDialog);
   elements.themeButton.addEventListener("click", toggleTheme);
   elements.toggleLibraryButton.addEventListener("click", () => togglePanel("library"));
@@ -58,6 +60,9 @@ document.addEventListener("DOMContentLoaded", () => {
   elements.nextButton.addEventListener("click", () => moveSelection(1));
   elements.copyPromptButton.addEventListener("click", copySelectedPrompt);
   elements.copyPromptDetailButton.addEventListener("click", copySelectedPrompt);
+  elements.favoriteButton.addEventListener("click", () => toggleFavorite(state.selectedPath));
+  elements.renameButton.addEventListener("click", renameSelectedItem);
+  elements.deleteButton.addEventListener("click", deleteSelectedItem);
   elements.playAllButton.addEventListener("click", () => {
     elements.compareGrid.querySelectorAll("video").forEach((video) => video.play().catch(() => {}));
   });
@@ -80,10 +85,24 @@ function toCamelCase(value) {
   return value.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
 }
 
-async function loadLibrary(preserveSelection) {
+function readFavoriteIds() {
+  try {
+    const value = JSON.parse(localStorage.getItem("h3-archive-favorite-ids") || "[]");
+    return new Set(Array.isArray(value) ? value.filter((id) => typeof id === "string") : []);
+  } catch (error) {
+    return new Set();
+  }
+}
+
+function saveFavoriteIds() {
+  localStorage.setItem("h3-archive-favorite-ids", JSON.stringify(Array.from(state.favoriteIds)));
+}
+
+async function loadLibrary(preserveSelection, forceRefresh = false) {
   setBusy(true);
   try {
-    const response = await fetch("/api/library", { cache: "no-store" });
+    const endpoint = forceRefresh ? "/api/library?refresh=1" : "/api/library";
+    const response = await fetch(endpoint, { cache: "no-store" });
     if (!response.ok) throw new Error("library request failed");
     const payload = await response.json();
     state.items = Array.isArray(payload.items) ? payload.items : [];
@@ -105,16 +124,17 @@ async function loadLibrary(preserveSelection) {
       clearSelection();
     }
 
+    const paired = payload.stats ? payload.stats.paired : state.items.length;
     const ignored = payload.stats ? payload.stats.unpaired_videos : 0;
     elements.libraryStatus.textContent = state.items.length
-      ? state.items.length + " 組配對" + (ignored ? " · " + ignored + " 支未納入" : "")
+      ? paired + " 組配對" + (ignored ? " · " + ignored + " 支未納入" : "")
       : "尚未加入來源";
-    elements.pairedCount.textContent = String(state.items.length).padStart(2, "0");
+    elements.pairedCount.textContent = String(paired).padStart(2, "0");
     elements.emptyState.querySelector("strong").textContent = state.sources.length
-      ? "找不到配對影片"
+      ? "找不到影片"
       : "尚未加入影片資料夾";
     elements.emptyState.querySelector("p").textContent = state.sources.length
-      ? "目前來源中沒有同檔名 MP4＋TXT 的配對。"
+      ? "目前來源中沒有可顯示的影片。"
       : "請按右上角「資料夾來源」，加入包含同檔名 MP4＋TXT 的資料夾。";
   } catch (error) {
     elements.libraryStatus.textContent = "掃描失敗";
@@ -225,26 +245,33 @@ async function removeSource(id) {
 function renderFolderFilters() {
   const counts = new Map();
   state.items.forEach((item) => counts.set(item.group, (counts.get(item.group) || 0) + 1));
+  const favoriteCount = state.items.filter((item) => state.favoriteIds.has(item.id)).length;
+  const unpairedCount = state.items.filter((item) => item.unpaired).length;
   elements.folderFilters.replaceChildren();
   elements.folderFilters.appendChild(createFilterButton("全部", state.items.length));
+  elements.folderFilters.appendChild(createFilterButton("已加星號", favoriteCount, FAVORITES_FILTER));
+  elements.folderFilters.appendChild(createFilterButton("未納入", unpairedCount, UNPAIRED_FILTER));
   Array.from(counts.keys()).sort((a, b) => a.localeCompare(b, "zh-Hant")).forEach((folder) => {
     elements.folderFilters.appendChild(createFilterButton(folder, counts.get(folder)));
   });
   updateFolderFilterState();
 }
 
-function createFilterButton(folder, count) {
+const FAVORITES_FILTER = "__favorites__";
+const UNPAIRED_FILTER = "__unpaired__";
+
+function createFilterButton(folder, count, filterValue = folder) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "filter-chip";
-  button.dataset.folder = folder;
+  button.dataset.folder = filterValue;
   const label = document.createElement("span");
   label.textContent = folder;
   const number = document.createElement("b");
   number.textContent = count;
   button.append(label, number);
   button.addEventListener("click", () => {
-    state.folder = folder;
+    state.folder = filterValue;
     updateFolderFilterState();
     applyFilters();
   });
@@ -260,7 +287,9 @@ function updateFolderFilterState() {
 function applyFilters() {
   const query = state.query;
   const filtered = state.items.filter((item) => {
-    if (state.folder !== "全部" && item.group !== state.folder) return false;
+    if (state.folder === FAVORITES_FILTER && !state.favoriteIds.has(item.id)) return false;
+    if (state.folder === UNPAIRED_FILTER && !item.unpaired) return false;
+    if (!["全部", FAVORITES_FILTER, UNPAIRED_FILTER].includes(state.folder) && item.group !== state.folder) return false;
     if (!query) return true;
     const metadata = item.metadata || {};
     const searchable = [
@@ -304,7 +333,9 @@ function renderVideoList() {
   state.filtered.forEach((item, index) => {
     const card = elements.videoCardTemplate.content.firstElementChild.cloneNode(true);
     const selectedForCompare = state.selectedPaths.has(item.id);
+    const isFavorite = state.favoriteIds.has(item.id);
     card.classList.toggle("is-current", item.id === state.selectedPath);
+    card.classList.toggle("is-unpaired", Boolean(item.unpaired));
     card.classList.toggle("is-selected-for-compare", selectedForCompare);
     const selectButton = card.querySelector(".select-toggle");
     selectButton.setAttribute("aria-pressed", String(selectedForCompare));
@@ -312,6 +343,17 @@ function renderVideoList() {
     selectButton.addEventListener("click", (event) => {
       event.stopPropagation();
       toggleCompareSelection(item.id);
+    });
+
+    const favoriteButton = card.querySelector(".favorite-toggle");
+    favoriteButton.classList.toggle("is-favorite", isFavorite);
+    favoriteButton.textContent = isFavorite ? "★" : "☆";
+    favoriteButton.setAttribute("aria-pressed", String(isFavorite));
+    favoriteButton.setAttribute("aria-label", isFavorite ? "取消星號 " + item.filename : "標註星號 " + item.filename);
+    favoriteButton.title = isFavorite ? "取消星號" : "標註星號";
+    favoriteButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleFavorite(item.id);
     });
 
     const mainButton = card.querySelector(".card-main");
@@ -323,19 +365,18 @@ function renderVideoList() {
     card.querySelector(".card-title").textContent = item.filename;
     card.querySelector(".card-folder").textContent = item.folder;
     card.querySelector(".card-index").textContent = String(index + 1).padStart(2, "0");
-    card.querySelector(".card-kind").textContent = item.metadata.kind || "Metadata";
-    card.querySelector(".card-meta").textContent = [
-      formatResolution(item.metadata.width, item.metadata.height),
-      formatDuration(item.metadata.duration || item.media.duration),
-      item.metadata.seed !== null && item.metadata.seed !== undefined ? "seed " + item.metadata.seed : "seed —",
-    ].join("  ·  ");
+    card.querySelector(".card-kind").textContent = item.unpaired ? "未納入" : (item.metadata.kind || "Metadata");
+    card.querySelector(".card-meta").textContent = item.unpaired
+      ? ["沒有同檔名 TXT", formatResolution(item.media.width, item.media.height), formatDuration(item.media.duration)].join("  ·  ")
+      : [
+          formatResolution(item.metadata.width, item.metadata.height),
+          formatDuration(item.metadata.duration || item.media.duration),
+          item.metadata.seed !== null && item.metadata.seed !== undefined ? "seed " + item.metadata.seed : "seed —",
+        ].join("  ·  ");
 
     const thumb = card.querySelector(".card-thumb");
-    thumb.src = item.video_url;
-    thumb.addEventListener("loadeddata", () => {
-      if (Number.isFinite(thumb.duration) && thumb.duration > 0) thumb.currentTime = Math.min(0.12, thumb.duration);
-    }, { once: true });
-    thumb.addEventListener("seeked", () => thumb.pause(), { once: true });
+    thumb.src = item.thumbnail_url;
+    thumb.alt = item.filename;
     fragment.appendChild(card);
   });
   elements.videoList.appendChild(fragment);
@@ -392,34 +433,45 @@ function updateStage(item) {
   elements.currentTitle.textContent = item.filename;
   elements.currentPath.textContent = item.folder;
   elements.currentBadges.replaceChildren();
-  appendBadge(elements.currentBadges, item.metadata.kind || "Metadata", "accent");
-  appendBadge(elements.currentBadges, item.metadata.status === "complete" ? "TXT 完整" : "TXT 部分欄位", item.metadata.status === "complete" ? "good" : "warn");
+  appendBadge(elements.currentBadges, item.unpaired ? "未納入" : (item.metadata.kind || "Metadata"), item.unpaired ? "warn" : "accent");
+  appendBadge(elements.currentBadges, item.unpaired ? "沒有 TXT" : (item.metadata.status === "complete" ? "TXT 完整" : "TXT 部分欄位"), item.unpaired || item.metadata.status !== "complete" ? "warn" : "good");
   if (item.metadata.mode) appendBadge(elements.currentBadges, item.metadata.mode, "neutral");
   elements.mediaFacts.textContent = [
     formatResolution(item.metadata.width || item.media.width, item.metadata.height || item.media.height),
     formatDuration(item.metadata.duration || item.media.duration),
     formatFps(item.metadata.fps || item.media.fps),
   ].join("  ·  ");
+  updateFavoriteButton(item);
+  elements.renameButton.disabled = false;
+  elements.deleteButton.disabled = false;
 }
 
 function renderInspector(item) {
   elements.inspectorEmpty.classList.add("hidden");
   elements.inspectorContent.classList.remove("hidden");
   const metadata = item.metadata || {};
-  elements.metadataStatus.textContent = metadata.status === "complete" ? "完整記錄" : "部分記錄";
-  elements.metadataStatus.className = "status-badge " + (metadata.status === "complete" ? "status-good" : "status-warn");
+  elements.metadataStatus.textContent = item.unpaired ? "未納入" : (metadata.status === "complete" ? "完整記錄" : "部分記錄");
+  elements.metadataStatus.className = "status-badge " + (metadata.status === "complete" && !item.unpaired ? "status-good" : "status-warn");
 
-  const fields = [
-    ["類型", metadata.kind || "—"],
-    ["模式", metadata.mode || "—"],
-    ["Seed", metadata.seed ?? "—"],
-    ["輸出尺寸", formatResolution(metadata.width, metadata.height)],
-    ["片長", formatDuration(metadata.duration || item.media.duration)],
-    ["FPS", formatFps(metadata.fps || item.media.fps)],
-    ["模型", metadata.model || "—"],
-    ["LoRA", metadata.lora || "—"],
-  ];
-  if (metadata.kind === "VOSR2") {
+  const fields = item.unpaired
+    ? [
+        ["狀態", "找不到同檔名 TXT"],
+        ["影片", item.filename],
+        ["影片尺寸", formatResolution(item.media.width, item.media.height)],
+        ["片長", formatDuration(item.media.duration)],
+        ["FPS", formatFps(item.media.fps)],
+      ]
+    : [
+        ["類型", metadata.kind || "—"],
+        ["模式", metadata.mode || "—"],
+        ["Seed", metadata.seed ?? "—"],
+        ["輸出尺寸", formatResolution(metadata.width, metadata.height)],
+        ["片長", formatDuration(metadata.duration || item.media.duration)],
+        ["FPS", formatFps(metadata.fps || item.media.fps)],
+        ["模型", metadata.model || "—"],
+        ["LoRA", metadata.lora || "—"],
+      ];
+  if (!item.unpaired && metadata.kind === "VOSR2") {
     fields.push(["來源", metadata.source_file || "—"]);
     fields.push(["來源尺寸", formatResolution(metadata.source_width, metadata.source_height)]);
     fields.push(["目標尺寸", formatResolution(metadata.target_width, metadata.target_height)]);
@@ -454,10 +506,35 @@ function renderInspector(item) {
     empty.textContent = "此生成記錄沒有參考媒體映射。";
     elements.referenceContent.appendChild(empty);
   }
-  elements.promptContent.textContent = item.prompt || "此 TXT 沒有 PROMPT BEGIN 區段。";
-  elements.rawContent.textContent = item.raw_text || "沒有原始 TXT 內容。";
+  elements.promptContent.textContent = item.unpaired ? "此影片尚未有同檔名 TXT。" : (item.prompt || "此 TXT 沒有 PROMPT BEGIN 區段。");
+  elements.rawContent.textContent = item.unpaired ? "此影片尚未有同檔名 TXT。" : (item.raw_text || "沒有原始 TXT 內容。");
   elements.copyPromptButton.disabled = !item.prompt;
   elements.copyPromptDetailButton.disabled = !item.prompt;
+}
+
+function updateFavoriteButton(item) {
+  const isFavorite = Boolean(item && state.favoriteIds.has(item.id));
+  elements.favoriteButton.textContent = isFavorite ? "★" : "☆";
+  elements.favoriteButton.classList.toggle("is-favorite", isFavorite);
+  elements.favoriteButton.setAttribute("aria-pressed", String(isFavorite));
+  elements.favoriteButton.setAttribute("aria-label", isFavorite ? "取消目前影片星號" : "標註目前影片星號");
+  elements.favoriteButton.title = isFavorite ? "取消星號" : "標註星號";
+  elements.favoriteButton.disabled = !item;
+}
+
+function toggleFavorite(id) {
+  if (!id) return;
+  if (state.favoriteIds.has(id)) {
+    state.favoriteIds.delete(id);
+    showToast("已取消星號。");
+  } else {
+    state.favoriteIds.add(id);
+    showToast("已標註星號，可用「已加星號」快速找到。");
+  }
+  saveFavoriteIds();
+  renderFolderFilters();
+  applyFilters();
+  if (state.selectedItem && state.selectedItem.id === id) updateFavoriteButton(state.selectedItem);
 }
 
 function togglePanel(panel) {
@@ -499,6 +576,11 @@ function clearSelection() {
   elements.currentBadges.replaceChildren();
   elements.mediaFacts.replaceChildren();
   elements.copyPromptButton.disabled = true;
+  elements.favoriteButton.disabled = true;
+  elements.renameButton.disabled = true;
+  elements.deleteButton.disabled = true;
+  elements.favoriteButton.textContent = "☆";
+  elements.favoriteButton.classList.remove("is-favorite");
   elements.inspectorEmpty.classList.remove("hidden");
   elements.inspectorContent.classList.add("hidden");
 }
@@ -525,6 +607,64 @@ async function copySelectedPrompt() {
   await copyText(prompt);
 }
 
+async function renameSelectedItem() {
+  const item = state.selectedItem;
+  if (!item || state.compareMode) return;
+  const currentStem = item.filename.replace(/\.[^.]+$/, "");
+  const requestedName = window.prompt("輸入新的檔名（不含副檔名；TXT 會同步更新）", currentStem);
+  if (requestedName === null || !requestedName.trim()) return;
+  setItemActionsBusy(true);
+  try {
+    const response = await fetch("/api/item", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: item.id, name: requestedName.trim() }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "rename failed");
+    if (state.favoriteIds.has(item.id)) {
+      state.favoriteIds.delete(item.id);
+      state.favoriteIds.add(payload.item.id);
+      saveFavoriteIds();
+    }
+    state.selectedPath = payload.item.id;
+    showToast("影片已重命名，TXT 也已同步更新。");
+    await loadLibrary(true);
+  } catch (error) {
+    showToast(error.message || "重命名失敗。");
+  } finally {
+    setItemActionsBusy(false);
+  }
+}
+
+async function deleteSelectedItem() {
+  const item = state.selectedItem;
+  if (!item || state.compareMode) return;
+  const companion = item.unpaired ? "（沒有同檔名 TXT）" : "，同檔名 TXT 也會一起移到垃圾桶";
+  if (!window.confirm("確定要將「" + item.filename + "」移到垃圾桶嗎？" + companion)) return;
+  setItemActionsBusy(true);
+  try {
+    const response = await fetch("/api/item?id=" + encodeURIComponent(item.id), { method: "DELETE" });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "delete failed");
+    state.favoriteIds.delete(item.id);
+    saveFavoriteIds();
+    state.selectedPath = null;
+    showToast("影片" + (item.unpaired ? "" : "與 TXT ") + "已移到垃圾桶。");
+    await loadLibrary(false);
+  } catch (error) {
+    showToast(error.message || "刪除失敗。");
+  } finally {
+    setItemActionsBusy(false);
+  }
+}
+
+function setItemActionsBusy(isBusy) {
+  elements.favoriteButton.disabled = isBusy || !state.selectedItem;
+  elements.renameButton.disabled = isBusy || !state.selectedItem;
+  elements.deleteButton.disabled = isBusy || !state.selectedItem;
+}
+
 async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
@@ -549,6 +689,9 @@ async function enterCompareMode() {
   elements.exitCompareButton.classList.remove("hidden");
   elements.previousButton.classList.add("hidden");
   elements.nextButton.classList.add("hidden");
+  elements.favoriteButton.classList.add("hidden");
+  elements.renameButton.classList.add("hidden");
+  elements.deleteButton.classList.add("hidden");
   elements.stageKicker.textContent = "COMPARE MODE";
   elements.currentTitle.textContent = "多部影片比較";
   elements.currentPath.textContent = state.selectedPaths.size + " 部影片 · 可同時播放或個別控制";
@@ -563,6 +706,9 @@ function exitCompareMode() {
   elements.exitCompareButton.classList.add("hidden");
   elements.previousButton.classList.remove("hidden");
   elements.nextButton.classList.remove("hidden");
+  elements.favoriteButton.classList.remove("hidden");
+  elements.renameButton.classList.remove("hidden");
+  elements.deleteButton.classList.remove("hidden");
   elements.stageKicker.textContent = "NOW VIEWING";
   updateNavigationState();
   if (state.selectedItem) updateStage(state.selectedItem);

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#181d29" />
     <title>H3 Video Archive</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=20261003-4" />
+    <link rel="stylesheet" href="/assets/styles.css?v=20261004-3" />
   </head>
   <body>
     <div class="app-shell">
@@ -76,6 +76,9 @@
             </div>
             <div class="stage-actions">
               <button id="exit-compare-button" class="button button-quiet hidden" type="button">返回單片</button>
+              <button id="favorite-button" class="button button-icon stage-icon-action" type="button" title="標註星號" aria-label="標註目前影片星號" aria-pressed="false" disabled>☆</button>
+              <button id="rename-button" class="button button-quiet stage-file-action" type="button" disabled>重命名</button>
+              <button id="delete-button" class="button button-danger stage-file-action" type="button" disabled>丟垃圾桶</button>
               <button id="previous-button" class="icon-button" type="button" title="上一支 (P)" aria-label="上一支">‹</button>
               <button id="next-button" class="icon-button" type="button" title="下一支 (N)" aria-label="下一支">›</button>
             </div>
@@ -181,7 +184,7 @@
           </div>
           <button id="close-sources-button" class="icon-button" type="submit" aria-label="關閉">×</button>
         </div>
-        <p class="dialog-intro">查看器只會讀取你加入的資料夾，並找出同一資料夾內同檔名的 MP4＋TXT。直接執行時不會自動使用目前工作區。</p>
+        <p class="dialog-intro">查看器只會讀取你加入的資料夾；有同檔名 TXT 的影片會配對顯示，沒有 TXT 的 MP4 也會列在「未納入」。直接執行時不會自動使用目前工作區。</p>
         <div class="source-add-form">
           <label>
             資料夾完整路徑
@@ -212,7 +215,7 @@
         </button>
         <button class="card-main" type="button">
           <div class="card-thumb-wrap">
-            <video class="card-thumb" muted playsinline preload="metadata"></video>
+            <img class="card-thumb" loading="lazy" decoding="async" alt="" />
             <span class="card-kind"></span>
             <span class="card-index"></span>
           </div>
@@ -222,6 +225,7 @@
             <div class="card-meta"></div>
           </div>
         </button>
+        <button class="favorite-toggle" type="button" aria-label="標註星號" aria-pressed="false">☆</button>
       </article>
     </template>
 

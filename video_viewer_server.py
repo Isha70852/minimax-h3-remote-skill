@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import json
 import mimetypes
+import os
 import re
 import subprocess
+import tempfile
+from ctypes import wintypes
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import RLock, get_ident
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
@@ -19,6 +24,8 @@ VIEWER_DIR = Path(__file__).resolve().parent / "viewer"
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "video_viewer_sources.json"
 VIDEO_SUFFIX = ".mp4"
 MEDIA_PROBE_CACHE: dict[str, tuple[int, int, dict[str, Any]]] = {}
+THUMBNAIL_CACHE_DIR = Path(tempfile.gettempdir()) / "h3-video-viewer-thumbnails"
+THUMBNAIL_CACHE_LOCK = RLock()
 
 
 def source_id(path: Path) -> str:
@@ -251,6 +258,61 @@ def probe_media(video_path: Path) -> dict[str, Any]:
     return result
 
 
+def thumbnail_cache_path(video_path: Path) -> Path:
+    key = hashlib.sha1(str(video_path.resolve()).casefold().encode("utf-8")).hexdigest()[:24]
+    return THUMBNAIL_CACHE_DIR / (key + ".jpg")
+
+
+def ensure_thumbnail(video_path: Path) -> Path:
+    """Create one reusable poster per video and refresh it only after the video changes."""
+    video_stat = video_path.stat()
+    cache_path = thumbnail_cache_path(video_path)
+    with THUMBNAIL_CACHE_LOCK:
+        try:
+            if cache_path.is_file() and cache_path.stat().st_mtime_ns >= video_stat.st_mtime_ns:
+                return cache_path
+        except OSError:
+            pass
+
+        THUMBNAIL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        temporary_path = THUMBNAIL_CACHE_DIR / (
+            cache_path.stem + f".tmp-{os.getpid()}-{get_ident()}.jpg"
+        )
+        try:
+            completed = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-ss",
+                    "0.12",
+                    "-i",
+                    str(video_path),
+                    "-frames:v",
+                    "1",
+                    "-vf",
+                    "scale=320:-2",
+                    "-q:v",
+                    "5",
+                    str(temporary_path),
+                ],
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+            if completed.returncode != 0 or not temporary_path.is_file():
+                raise OSError("ffmpeg 無法產生影片縮圖。")
+            temporary_path.replace(cache_path)
+        finally:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
+    return cache_path
+
+
 def metadata_summary(
     kind: str,
     values: dict[str, str],
@@ -341,15 +403,74 @@ def build_item(source: dict[str, Any], video_path: Path, info_path: Path) -> dic
         "modified_iso": datetime.fromtimestamp(stat.st_mtime).isoformat(),
         "size_bytes": stat.st_size,
         "video_url": "/media?id=" + quote(item_id, safe=""),
+        "thumbnail_url": "/thumbnail?id=" + quote(item_id, safe="") + "&v=" + str(stat.st_mtime_ns),
         "metadata": metadata_summary(kind, values, prompt, media),
         "media": media,
         "metadata_kind": kind,
+        "has_info": True,
+        "unpaired": False,
         "metadata_fields": values,
         "reference_mapping": reference_mapping,
         "prompt": prompt,
         "raw_text": info_text,
         "_video_path": video_path,
         "_info_path": info_path,
+    }
+
+
+def build_unpaired_item(source: dict[str, Any], video_path: Path) -> dict[str, Any]:
+    """Build a playable library item for an MP4 that has no matching TXT."""
+    relative_video = video_path.resolve().relative_to(Path(source["path"]).resolve()).as_posix()
+    relative_directory = Path(relative_video).parent.as_posix()
+    folder = source["label"] if relative_directory == "." else source["label"] + "/" + relative_directory
+    stat = video_path.stat()
+    item_id = source["id"] + "::" + relative_video
+    media = probe_media(video_path)
+    return {
+        "id": item_id,
+        "path": relative_video,
+        "info_path": None,
+        "filename": video_path.name,
+        "folder": folder,
+        "group": source["label"],
+        "source_id": source["id"],
+        "source_label": source["label"],
+        "modified": stat.st_mtime,
+        "modified_iso": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+        "size_bytes": stat.st_size,
+        "video_url": "/media?id=" + quote(item_id, safe=""),
+        "thumbnail_url": "/thumbnail?id=" + quote(item_id, safe="") + "&v=" + str(stat.st_mtime_ns),
+        "metadata": {
+            "kind": "未納入",
+            "status": "missing",
+            "mode": None,
+            "seed": None,
+            "model": None,
+            "lora": None,
+            "lora_strength": None,
+            "width": media.get("width"),
+            "height": media.get("height"),
+            "duration": media.get("duration"),
+            "fps": media.get("fps"),
+            "frames": None,
+            "source_file": None,
+            "source_width": None,
+            "source_height": None,
+            "target_width": None,
+            "target_height": None,
+            "fit_side": None,
+            "prompt_available": False,
+        },
+        "media": media,
+        "metadata_kind": "Unpaired",
+        "has_info": False,
+        "unpaired": True,
+        "metadata_fields": {},
+        "reference_mapping": [],
+        "prompt": "",
+        "raw_text": "",
+        "_video_path": video_path,
+        "_info_path": None,
     }
 
 
@@ -367,6 +488,10 @@ def scan_library(sources: list[dict[str, Any]]) -> dict[str, Any]:
             info_path = find_matching_info(video_path)
             if info_path is None:
                 unpaired_videos += 1
+                try:
+                    items.append(build_unpaired_item(source, video_path))
+                except (OSError, UnicodeError, ValueError):
+                    continue
                 continue
             try:
                 items.append(build_item(source, video_path, info_path))
@@ -379,10 +504,65 @@ def scan_library(sources: list[dict[str, Any]]) -> dict[str, Any]:
         "folders": sorted({item["group"] for item in items}),
         "items": items,
         "stats": {
-            "paired": len(items),
+            "paired": len(items) - unpaired_videos,
+            "total_videos": len(items),
             "unpaired_videos": unpaired_videos,
         },
     }
+
+
+def send_to_recycle_bin(paths: list[Path]) -> None:
+    """Send files to the Windows Recycle Bin without permanently deleting them."""
+    if not paths:
+        return
+    if os.name != "nt":
+        raise OSError("目前只支援 Windows 垃圾桶操作。")
+
+    class SHFileOpStructW(ctypes.Structure):
+        _fields_ = [
+            ("hwnd", wintypes.HWND),
+            ("wFunc", wintypes.UINT),
+            ("pFrom", wintypes.LPCWSTR),
+            ("pTo", wintypes.LPCWSTR),
+            ("fFlags", wintypes.UINT),
+            ("fAnyOperationsAborted", wintypes.BOOL),
+            ("hNameMappings", wintypes.LPVOID),
+            ("lpszProgressTitle", wintypes.LPCWSTR),
+        ]
+
+    # SHFileOperation expects a double-NUL-terminated list of paths.
+    file_list = "\0".join(str(path.resolve()) for path in paths) + "\0\0"
+    operation = SHFileOpStructW(
+        None,
+        0x0003,  # FO_DELETE
+        file_list,
+        None,
+        0x0040 | 0x0010 | 0x0004 | 0x0400,  # allow undo, no confirmation/UI
+        False,
+        None,
+        None,
+    )
+    result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
+    if result or operation.fAnyOperationsAborted:
+        raise OSError(f"Windows 垃圾桶操作失敗（代碼 {result}）。")
+
+
+def normalize_video_stem(value: str) -> str:
+    """Validate the user-entered base name while keeping it inside its folder."""
+    stem = value.strip()
+    if stem.lower().endswith(".mp4"):
+        stem = stem[:-4].rstrip()
+    elif stem.lower().endswith(".txt"):
+        stem = stem[:-4].rstrip()
+    if not stem:
+        raise ValueError("檔名不可為空白。")
+    if any(character in stem for character in '<>:"/\\|?*'):
+        raise ValueError("檔名含有 Windows 不允許的字元。")
+    if stem.endswith((".", " ")):
+        raise ValueError("檔名不可用句點或空白結尾。")
+    if stem.casefold() in {"con", "prn", "aux", "nul"} or re.fullmatch(r"com[1-9]", stem.casefold()) or re.fullmatch(r"lpt[1-9]", stem.casefold()):
+        raise ValueError("這是 Windows 保留名稱，不能使用。")
+    return stem
 
 
 def public_item(item: dict[str, Any], include_detail: bool = False) -> dict[str, Any]:
@@ -410,8 +590,12 @@ def create_handler(
     cli_sources: list[dict[str, Any]],
     config_path: Path,
 ):
+    library_cache: dict[str, Any] | None = None
+    library_cache_signature: tuple[Any, ...] | None = None
+    library_cache_lock = RLock()
+
     class VideoViewerHandler(BaseHTTPRequestHandler):
-        server_version = "H3VideoViewer/2.0"
+        server_version = "H3VideoViewer/2.2"
 
         def log_message(self, format: str, *args: Any) -> None:
             print("%s - %s" % (self.address_string(), format % args))
@@ -419,16 +603,49 @@ def create_handler(
         def active_sources(self) -> list[dict[str, Any]]:
             return merge_sources(cli_sources, load_config(config_path))
 
-        def current_library(self) -> dict[str, Any]:
-            return scan_library(self.active_sources())
+        def current_library(self, force_refresh: bool = False) -> dict[str, Any]:
+            nonlocal library_cache, library_cache_signature
+            sources = self.active_sources()
+            signature = tuple(
+                (source["id"], source["path"], source["label"], source["exists"])
+                for source in sources
+            )
+            with library_cache_lock:
+                if not force_refresh and library_cache is not None and signature == library_cache_signature:
+                    return library_cache
+                library_cache = scan_library(sources)
+                library_cache_signature = signature
+                return library_cache
+
+        def invalidate_library(self) -> None:
+            nonlocal library_cache, library_cache_signature
+            with library_cache_lock:
+                library_cache = None
+                library_cache_signature = None
+
+        def find_item(self, requested_id: str | None) -> dict[str, Any] | None:
+            if not requested_id:
+                return None
+            return next(
+                (candidate for candidate in self.current_library()["items"] if candidate["id"] == requested_id),
+                None,
+            )
+
+        def read_json_body(self) -> dict[str, Any]:
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("請求內容格式錯誤。")
+            return payload
 
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
             query = parse_qs(parsed.query)
             if parsed.path == "/api/library":
-                library = self.current_library()
-                library["items"] = [public_item(item) for item in library["items"]]
-                json_response(self, library)
+                library = self.current_library(query.get("refresh", ["0"])[0] in {"1", "true"})
+                payload = dict(library)
+                payload["items"] = [public_item(item) for item in library["items"]]
+                json_response(self, payload)
                 return
             if parsed.path == "/api/item":
                 self.handle_item(query.get("id", [None])[0])
@@ -438,6 +655,9 @@ def create_handler(
                 return
             if parsed.path == "/media":
                 self.handle_media(query.get("id", [None])[0])
+                return
+            if parsed.path == "/thumbnail":
+                self.handle_thumbnail(query.get("id", [None])[0])
                 return
             if parsed.path == "/":
                 self.serve_viewer_file(VIEWER_DIR / "index.html")
@@ -456,8 +676,7 @@ def create_handler(
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
             try:
-                length = int(self.headers.get("Content-Length", "0"))
-                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                payload = self.read_json_body()
                 path = Path(str(payload.get("path", "")).strip()).expanduser().resolve()
                 if not path.is_dir():
                     error_response(self, "資料夾不存在或不是資料夾。", HTTPStatus.BAD_REQUEST)
@@ -466,13 +685,97 @@ def create_handler(
                 configured = load_config(config_path)
                 merged = merge_sources(configured, [make_source(path, label, True)])
                 save_config(config_path, merged)
+                self.invalidate_library()
                 source = next(item for item in merged if item["id"] == source_id(path))
                 json_response(self, {"ok": True, "source": source, "sources": merged})
             except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
                 error_response(self, "無法加入資料夾：" + str(exc), HTTPStatus.BAD_REQUEST)
 
+        def do_PATCH(self) -> None:
+            parsed = urlparse(self.path)
+            if parsed.path != "/api/item":
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            try:
+                payload = self.read_json_body()
+                requested_id = str(payload.get("id", ""))
+                item = self.find_item(requested_id)
+                if item is None:
+                    error_response(self, "找不到指定影片。", HTTPStatus.NOT_FOUND)
+                    return
+
+                requested_name = str(payload.get("name", "")).strip()
+                new_stem = normalize_video_stem(requested_name)
+                video_path = item["_video_path"]
+                info_path = item["_info_path"]
+                if new_stem.casefold() == video_path.stem.casefold():
+                    error_response(self, "新檔名需要和目前檔名不同。", HTTPStatus.BAD_REQUEST)
+                    return
+
+                new_video_path = video_path.with_name(new_stem + video_path.suffix)
+                new_info_path = (
+                    info_path.with_name(new_stem + info_path.suffix)
+                    if info_path is not None
+                    else None
+                )
+                if new_video_path.exists() or (new_info_path is not None and new_info_path.exists()):
+                    error_response(self, "目標檔名已存在，請換一個名稱。", HTTPStatus.CONFLICT)
+                    return
+
+                video_path.rename(new_video_path)
+                try:
+                    if info_path is not None and new_info_path is not None:
+                        info_path.rename(new_info_path)
+                except OSError:
+                    try:
+                        new_video_path.rename(video_path)
+                    except OSError:
+                        pass
+                    raise
+
+                MEDIA_PROBE_CACHE.pop(str(video_path.resolve()), None)
+                MEDIA_PROBE_CACHE.pop(str(new_video_path.resolve()), None)
+                self.invalidate_library()
+                renamed_library = self.current_library()
+                renamed_item = next(
+                    (candidate for candidate in renamed_library["items"]
+                     if candidate["_video_path"].resolve() == new_video_path.resolve()),
+                    None,
+                )
+                if renamed_item is None:
+                    raise OSError("重新掃描後找不到已重命名的影片。")
+                json_response(self, {"ok": True, "old_id": requested_id, "item": public_item(renamed_item)})
+            except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+                error_response(self, "無法重命名影片：" + str(exc), HTTPStatus.BAD_REQUEST)
+
         def do_DELETE(self) -> None:
             parsed = urlparse(self.path)
+            if parsed.path == "/api/item":
+                requested_id = parse_qs(parsed.query).get("id", [None])[0]
+                item = self.find_item(requested_id)
+                if item is None:
+                    error_response(self, "找不到指定影片。", HTTPStatus.NOT_FOUND)
+                    return
+                paths = [item["_video_path"]]
+                if item["_info_path"] is not None:
+                    paths.append(item["_info_path"])
+                if any(not path.is_file() for path in paths):
+                    error_response(self, "影片或 TXT 已不在原位置，請先重新掃描。", HTTPStatus.NOT_FOUND)
+                    return
+                try:
+                    send_to_recycle_bin(paths)
+                except OSError as exc:
+                    error_response(self, "無法移到垃圾桶：" + str(exc), HTTPStatus.INTERNAL_SERVER_ERROR)
+                    return
+                for path in paths:
+                    MEDIA_PROBE_CACHE.pop(str(path.resolve()), None)
+                self.invalidate_library()
+                json_response(self, {
+                    "ok": True,
+                    "id": requested_id,
+                    "deleted": [path.name for path in paths],
+                })
+                return
             if parsed.path != "/api/sources":
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
@@ -483,6 +786,7 @@ def create_handler(
                 error_response(self, "找不到指定資料夾。", HTTPStatus.NOT_FOUND)
                 return
             save_config(config_path, remaining)
+            self.invalidate_library()
             json_response(self, {"ok": True, "sources": self.active_sources()})
 
         def serve_viewer_file(self, file_path: Path) -> None:
@@ -507,12 +811,9 @@ def create_handler(
             if not requested_id:
                 error_response(self, "缺少影片 id。", HTTPStatus.BAD_REQUEST)
                 return
-            item = next(
-                (candidate for candidate in self.current_library()["items"] if candidate["id"] == requested_id),
-                None,
-            )
+            item = self.find_item(requested_id)
             if item is None:
-                error_response(self, "找不到已配對的影片。", HTTPStatus.NOT_FOUND)
+                error_response(self, "找不到指定影片。", HTTPStatus.NOT_FOUND)
                 return
             json_response(self, public_item(item, include_detail=True))
 
@@ -520,10 +821,7 @@ def create_handler(
             if not requested_id:
                 self.send_error(HTTPStatus.BAD_REQUEST, "Missing video id")
                 return
-            item = next(
-                (candidate for candidate in self.current_library()["items"] if candidate["id"] == requested_id),
-                None,
-            )
+            item = self.find_item(requested_id)
             if item is None:
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
@@ -575,6 +873,27 @@ def create_handler(
                         remaining -= len(chunk)
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 return
+
+        def handle_thumbnail(self, requested_id: str | None) -> None:
+            if not requested_id:
+                self.send_error(HTTPStatus.BAD_REQUEST, "Missing video id")
+                return
+            item = self.find_item(requested_id)
+            if item is None:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            try:
+                thumbnail_path = ensure_thumbnail(item["_video_path"])
+                body = thumbnail_path.read_bytes()
+            except (FileNotFoundError, OSError):
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+            self.end_headers()
+            self.wfile.write(body)
 
         def do_HEAD(self) -> None:
             parsed = urlparse(self.path)
